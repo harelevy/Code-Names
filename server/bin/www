@@ -1,0 +1,247 @@
+#!/usr/bin/env node
+
+/**
+ * Module dependencies.
+ */
+
+var app = require("../app");
+var debug = require("debug")("express-demo:server");
+var http = require("http");
+var socketIO = require("socket.io");
+const Game = require("../Game");
+const GameModel = require("../models/GameModel");
+const Player = require("../Player");
+const winner = {
+  INITIAL: "initial",
+  HOST: "host",
+  HOSTED: "hosted",
+};
+
+/**
+ * Get port from environment and store in Express.
+ */
+
+var port = normalizePort(process.env.PORT || "8080");
+app.set("port", port);
+
+/**
+ * Create HTTP server.
+ */
+
+var server = http.createServer(app);
+var io = socketIO(server);
+var mongoose = require("mongoose");
+require("dotenv/config");
+mongoose.connect(
+  "mongodb+srv://harel1992levi:harel1992levi@hello1.ercmt.mongodb.net/Hello1?retryWrites=true&w=majority",
+  { useNewUrlParser: true, useUnifiedTopology: true },
+  () => {console.log("connected to DB!!");
+  fetchGamesFromDB();
+}
+);
+
+let games = [];// fetch from database
+function fetchGamesFromDB(){
+  GameModel.find({},(err,games2)=>{
+    games2.map((game)=>{
+       var gameToInsert = new Game({game_name:game.Name,user_id:game.HostPlayer.Id,user_name:game.HostPlayer.Name},game.Id);
+       gameToInsert.copyFrom(game);
+       games.push(gameToInsert);
+    });
+  });
+}
+
+
+
+var clients = [];
+io.on("connection", function (socket) {
+
+  console.log("user connected " + socket.id);
+  clients.push(socket);
+  socket.emit("INITIAL_USER_DATA", {
+    user_id: socket.id
+  });
+  socket.on("CREATE_GAME", async (json) => {
+    var game = new Game(json, games.length + 1);
+    game.Board.fillBoard();
+    games.push(game);
+    const gameModel = new GameModel(game);
+    const savedGame = await gameModel.save();
+    socket.emit("GAME_CREATED", game);
+  });
+  socket.on("CONNECT_GAME", async (json) => {
+    var gameIndex = games.findIndex(
+      (element) => element.Id == json.game_id
+    );
+    try {
+      games[gameIndex].HostedPlayer = new Player(json.user_id, json.user_name);
+      io.to(games[gameIndex].HostPlayer.Id).emit(
+        "RUN_GAME",
+        games[gameIndex]
+      );
+      await GameModel.updateOne(
+        { Id: json.game_id },
+        {
+          $set: {
+            HostedPlayer: {
+              Id: json.user_id,
+              Name: json.user_name,
+              Score: 0,
+            },
+          },
+        }
+      );
+      socket.emit("RUN_GAME", games[gameIndex]);
+    } catch {}
+  });
+  socket.on("START_GAME", async (json) => {
+    var gameIndex = games.findIndex(
+      (element) => element.Id == json.game_id
+    );
+
+    var hostedPlayer = games[gameIndex].HostedPlayer.Id;
+    io.to(hostedPlayer).emit("START_GAME", games[gameIndex]);
+    socket.emit("START_GAME", games[gameIndex]);
+  });
+  socket.on("UPDATE_STATE", async (json) => {
+    var gameIndex = games.findIndex(
+      (element) => element.Id == json.game_id
+      );
+      var currentGame = games[gameIndex];
+    var hostedPlayer = currentGame.HostedPlayer.Id;
+    var hostPlayer = currentGame.HostPlayer.Id;
+    currentGame.Board.flipCard(json.card);
+    currentGame.updateScore(json.card.BelongsTo);
+    currentGame.setWinner(json.card.BelongsTo);
+    if (currentGame.Winner == winner.INITIAL) {
+      currentGame.setTurn(json.card.BelongsTo);
+    }
+    io.to(hostPlayer).emit("UPDATE_BOARD", currentGame);
+    io.to(hostedPlayer).emit("UPDATE_BOARD", currentGame);
+  });
+  socket.on("END_GAME", async (json) => {
+   // console.log(json);
+    //console.log(games);
+    var gameIndex = games.findIndex(
+      (element) => element.Id == json.game_id
+    );
+    var game = games[gameIndex];
+    var hostPlayer = game.HostPlayer.Id;
+    var hostedPlayer = game.HostedPlayer.Id;
+    io.to(hostPlayer).emit("SAVE_PREVIOUS", {
+      game_name: game.Name,
+      host_id: game.HostPlayer.Id,
+      host_name: game.HostPlayer.Name,
+      hosted_id: game.HostedPlayer.Id,
+      hosted_name: game.HostedPlayer.Name,
+    });
+    io.to(hostedPlayer).emit("SAVE_PREVIOUS", {
+      game_name: game.Name,
+      host_id: game.HostPlayer.Id,
+      host_name: game.HostPlayer.Name,
+      hosted_id: game.HostedPlayer.Id,
+      hosted_name: game.HostedPlayer.Name,
+    });
+    games.splice(gameIndex, 1);
+    //need also to renove from DB
+  });
+  socket.on("REMATCH",  async (prev_game) => {
+    var game = new Game(
+      {
+        game_name: prev_game.game_name,
+        user_id: prev_game.host_id,
+        user_name: prev_game.host_name,
+      },
+      games.length + 1
+    );
+    game.Board.fillBoard();
+    game.HostedPlayer = new Player(prev_game.hosted_id, prev_game.hosted_name);
+    games.push(game);
+    io.to(game.HostPlayer.Id).emit("INITIALIZE_STATE", {
+      is_host: true,
+      game: game,
+    });
+    io.to(game.HostedPlayer.Id).emit("INITIALIZE_STATE", {
+      is_host: false,
+      game: game,
+    });
+    // io.to(game.HostPlayer.Id).emit("RUN_GAME", game);
+    // io.to(game.HostedPlayer.Id).emit("RUN_GAME", game);
+  });
+  socket.on("SHUFFLE_BOARD",  async (json) => {
+    var gameIndex = games.findIndex(
+      (element) => element.Id == json.game_id
+      );
+      var currentGame = games[gameIndex];
+      currentGame.Board.fillBoard();
+     var hostedPlayer = currentGame.HostedPlayer.Id;
+     var hostPlayer = currentGame.HostPlayer.Id;
+     io.to(hostPlayer).emit("RUN_GAME", currentGame);
+     io.to(hostedPlayer).emit("RUN_GAME", currentGame);
+    });
+  //update DB
+  });
+
+/**
+ * Listen on provided port, on all network interfaces.
+ */
+server.listen(port);
+server.on("error", onError);
+server.on("listening", onListening);
+
+/**
+ * Normalize a port into a number, string, or false.
+ */
+
+
+function normalizePort(val) {
+  var port = parseInt(val, 10);
+
+  if (isNaN(port)) {
+    // named pipe
+    return val;
+  }
+
+  if (port >= 0) {
+    // port number
+    return port;
+  }
+
+  return false;
+}
+
+/**
+ * Event listener for HTTP server "error" event.
+ */
+
+function onError(error) {
+  if (error.syscall !== "listen") {
+    throw error;
+  }
+
+  var bind = typeof port === "string" ? "Pipe " + port : "Port " + port;
+
+  // handle specific listen errors with friendly messages
+  switch (error.code) {
+    case "EACCES":
+      console.error(bind + " requires elevated privileges");
+      process.exit(1);
+      break;
+    case "EADDRINUSE":
+      console.error(bind + " is already in use");
+      process.exit(1);
+      break;
+    default:
+      throw error;
+  }
+}
+
+/**
+ * Event listener for HTTP server "listening" event.
+ */
+
+function onListening() {
+  var addr = server.address();
+  var bind = typeof addr === "string" ? "pipe " + addr : "port " + addr.port;
+  debug("Listening on " + bind);
+}

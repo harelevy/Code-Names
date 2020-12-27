@@ -1,0 +1,17 @@
+.rotator {
+  transform: rotateY(180deg);
+  transition: transform 3s;
+  transform-style: preserve-3d;
+}
+@keyframes fadein {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.background {
+  -webkit-animation: fadein 1s;
+  animation: fadein 1s;
+}
